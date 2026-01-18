@@ -186,19 +186,24 @@ func (m Model) renderFiles(width, height int) string {
 		for i, entry := range m.files {
 			statusText := fmt.Sprintf("%-2s", entry.Status)
 			statusColor := statusColor(entry.Status)
+			if i == m.selected {
+				bg := lipgloss.Color("62")
+				if m.focus != focusFiles {
+					bg = lipgloss.Color("238")
+				}
+				selectedStyle := lipgloss.NewStyle().Background(bg)
+				if statusColor != "" {
+					statusText = lipgloss.NewStyle().Foreground(statusColor).Render(statusText)
+				}
+				pathPart := selectedStyle.Render(entry.Path)
+				items = append(items, fmt.Sprintf("%s %s", statusText, pathPart))
+				continue
+			}
+
 			if statusColor != "" {
 				statusText = lipgloss.NewStyle().Foreground(statusColor).Render(statusText)
 			}
 			line := fmt.Sprintf("%s %s", statusText, entry.Path)
-			if i == m.selected {
-				selectedStyle := lipgloss.NewStyle().
-					Background(lipgloss.Color("62"))
-				if m.focus != focusFiles {
-					selectedStyle = lipgloss.NewStyle().
-						Background(lipgloss.Color("238"))
-				}
-				line = selectedStyle.Render(line)
-			}
 			items = append(items, line)
 		}
 	}

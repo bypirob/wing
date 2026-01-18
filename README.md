@@ -2,7 +2,7 @@
 
 Watch your git diffs live in your terminal while keeping Codex/Claude on the right side.
 
-![wing screenshot](assets/screenshot.png)
+![wing screenshot](assets/example1.png)
 
 > ⚠️ This project is a proof of concept.
 

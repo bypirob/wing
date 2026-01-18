@@ -3,8 +3,6 @@ package app
 import (
 	"strings"
 	"testing"
-
-	"wing/internal/git"
 )
 
 func TestToggleModeDoesNotChangeFocus(t *testing.T) {
@@ -37,7 +35,7 @@ func TestToggleFocus(t *testing.T) {
 func TestEnsureSelectionVisible(t *testing.T) {
 	m := New(Config{})
 	m.height = 20
-	m.files = make([]git.StatusEntry, 30)
+	m.rows = make([]fileRow, 30)
 	m.selected = 25
 	m.fileOffset = 0
 	m.ensureSelectionVisible()

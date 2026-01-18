@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ type Model struct {
 	width      int
 	height     int
 	files      []git.StatusEntry
+	rows       []fileRow
 	diff       string
 	diffLines  []string
 	contentLines []string
@@ -36,6 +38,18 @@ type Model struct {
 	commitText textinput.Model
 	mode       viewMode
 	gitInfo    string
+	collapsed  map[string]bool
+	showIgnored bool
+}
+
+type fileRow struct {
+	Path      string
+	Name      string
+	Status    string
+	IsDir     bool
+	Collapsed bool
+	Ignored   bool
+	Depth     int
 }
 
 func New(config Config) Model {
@@ -48,6 +62,7 @@ func New(config Config) Model {
 		focus:      focusFiles,
 		commitText: input,
 		mode:       modeExplorer,
+		collapsed:  make(map[string]bool),
 	}
 }
 
@@ -62,14 +77,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.updateContentLines()
 	case refreshMsg:
+		selectedKey := m.selectedKey()
 		m.files = msg.files
+		if m.collapsed == nil {
+			m.collapsed = make(map[string]bool)
+		}
+		m.rows = buildRows(m.files, m.collapsed)
 		m.diff = msg.diff
 		m.diffLines = splitLines(msg.diff)
 		m.updateContentLines()
 		m.err = msg.err
 		m.gitInfo = msg.gitInfo
-		m.selected = m.indexForPath(msg.selectedPath)
-		m.fileOffset = clampOffset(m.fileOffset, len(m.files), m.filesVisibleHeight())
+		m.selected = indexForKey(m.rows, selectedKey)
+		m.fileOffset = clampOffset(m.fileOffset, len(m.rows), m.filesVisibleHeight())
 		m.ensureSelectionVisible()
 	case diffMsg:
 		m.diff = msg.diff
@@ -83,6 +103,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "tab", "shift+tab":
 			m.toggleFocus()
+		case " ":
+			if m.focus == focusFiles {
+				if row, ok := m.selectedRow(); ok && row.IsDir {
+					m.toggleFolder(row.Path)
+				}
+			}
+		case "i":
+			m.showIgnored = !m.showIgnored
+			return m, m.refreshCmd()
 		case "m":
 			m.toggleMode()
 			return m, m.refreshCmd()
@@ -175,41 +204,57 @@ func (m Model) renderFiles(width, height int) string {
 		BorderForeground(borderColor)
 
 	title := titleStyle.Render("Files")
-	items := make([]string, 0, len(m.files)+1)
-	if len(m.files) == 0 {
+	items := make([]string, 0, len(m.rows)+1)
+	if len(m.rows) == 0 {
 		if m.mode == modeExplorer {
 			items = append(items, "No files found.")
 		} else {
 			items = append(items, "No changes detected.")
 		}
 	} else {
-		for i, entry := range m.files {
-			statusText := fmt.Sprintf("%-2s", entry.Status)
-			statusColor := statusColor(entry.Status)
-			if i == m.selected {
-				bg := lipgloss.Color("62")
-				if m.focus != focusFiles {
-					bg = lipgloss.Color("238")
-				}
-				selectedStyle := lipgloss.NewStyle().Background(bg)
-				if statusColor != "" {
-					statusText = lipgloss.NewStyle().Foreground(statusColor).Render(statusText)
-				}
-				pathPart := selectedStyle.Render(entry.Path)
-				items = append(items, fmt.Sprintf("%s %s", statusText, pathPart))
-				continue
-			}
-
-			if statusColor != "" {
-				statusText = lipgloss.NewStyle().Foreground(statusColor).Render(statusText)
-			}
-			line := fmt.Sprintf("%s %s", statusText, entry.Path)
+		for i, row := range m.rows {
+			line := m.renderRow(row, i == m.selected)
 			items = append(items, line)
 		}
 	}
 
 	body := strings.Join(m.sliceLines(items, m.fileOffset, m.filesVisibleHeight()), "\n")
 	return style.Render(fmt.Sprintf("%s\n\n%s", title, body))
+}
+
+func (m Model) renderRow(row fileRow, selected bool) string {
+	statusText := fmt.Sprintf("%-2s", row.Status)
+	if row.IsDir {
+		statusText = "  "
+	}
+	statusStyle := lipgloss.NewStyle()
+	statusColor := statusColor(row.Status)
+	if row.IsDir {
+		statusColor = ""
+	}
+	if statusColor != "" {
+		statusStyle = statusStyle.Foreground(statusColor)
+	}
+	if row.Ignored {
+		statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	}
+	statusText = statusStyle.Render(statusText)
+
+	label := rowLabel(row)
+	labelStyle := lipgloss.NewStyle()
+	if row.Ignored {
+		labelStyle = labelStyle.Foreground(lipgloss.Color("240"))
+	}
+	if selected {
+		bg := lipgloss.Color("62")
+		if m.focus != focusFiles {
+			bg = lipgloss.Color("238")
+		}
+		labelStyle = labelStyle.Background(bg)
+	}
+	label = labelStyle.Render(label)
+
+	return fmt.Sprintf("%s %s", statusText, label)
 }
 
 func (m Model) renderDiff(width, height int) string {
@@ -259,11 +304,22 @@ func (m Model) renderDiff(width, height int) string {
 	return style.Render(fmt.Sprintf("%s\n\n%s", title, body))
 }
 
+func rowLabel(row fileRow) string {
+	indent := strings.Repeat("  ", row.Depth)
+	if row.IsDir {
+		marker := ">"
+		if !row.Collapsed {
+			marker = "v"
+		}
+		return fmt.Sprintf("%s%s %s/", indent, marker, row.Name)
+	}
+	return fmt.Sprintf("%s%s", indent, row.Name)
+}
+
 type refreshMsg struct {
 	files        []git.StatusEntry
 	diff         string
 	err          error
-	selectedPath string
 	gitInfo      string
 }
 
@@ -283,8 +339,9 @@ type pushMsg struct {
 }
 
 func (m Model) refreshCmd() tea.Cmd {
-	keepPath := m.selectedPath()
+	keepPath := m.selectedFilePath()
 	mode := m.mode
+	showIgnored := m.showIgnored
 	return func() tea.Msg {
 		var (
 			files    []git.StatusEntry
@@ -292,7 +349,7 @@ func (m Model) refreshCmd() tea.Cmd {
 			err      error
 		)
 		if mode == modeExplorer {
-			files, err = git.ListFiles(m.config.RepoPath)
+			files, err = git.ListFiles(m.config.RepoPath, showIgnored)
 			if err == nil {
 				var statusErr error
 				statuses, statusErr = git.Status(m.config.RepoPath)
@@ -341,7 +398,7 @@ func (m Model) refreshCmd() tea.Cmd {
 			err = diffErr
 		}
 
-		return refreshMsg{files: files, diff: diff, err: err, selectedPath: selectedPath, gitInfo: gitInfo}
+		return refreshMsg{files: files, diff: diff, err: err, gitInfo: gitInfo}
 	}
 }
 
@@ -390,7 +447,7 @@ func (m Model) tickCmd() tea.Cmd {
 }
 
 func (m *Model) moveSelection(delta int) {
-	if len(m.files) == 0 {
+	if len(m.rows) == 0 {
 		m.selected = 0
 		m.fileOffset = 0
 		return
@@ -399,21 +456,32 @@ func (m *Model) moveSelection(delta int) {
 	if next < 0 {
 		next = 0
 	}
-	if next >= len(m.files) {
-		next = len(m.files) - 1
+	if next >= len(m.rows) {
+		next = len(m.rows) - 1
 	}
 	m.selected = next
 	m.ensureSelectionVisible()
 }
 
-func (m Model) selectedEntry() (git.StatusEntry, bool) {
-	if len(m.files) == 0 || m.selected < 0 || m.selected >= len(m.files) {
-		return git.StatusEntry{}, false
+func (m Model) selectedRow() (fileRow, bool) {
+	if len(m.rows) == 0 || m.selected < 0 || m.selected >= len(m.rows) {
+		return fileRow{}, false
 	}
-	return m.files[m.selected], true
+	return m.rows[m.selected], true
 }
 
-func (m Model) selectedPath() string {
+func (m Model) selectedEntry() (git.StatusEntry, bool) {
+	if len(m.rows) == 0 || m.selected < 0 || m.selected >= len(m.rows) {
+		return git.StatusEntry{}, false
+	}
+	row := m.rows[m.selected]
+	if row.IsDir {
+		return git.StatusEntry{}, false
+	}
+	return git.StatusEntry{Path: row.Path, Status: row.Status, Ignored: row.Ignored}, true
+}
+
+func (m Model) selectedFilePath() string {
 	entry, ok := m.selectedEntry()
 	if !ok {
 		return ""
@@ -421,12 +489,27 @@ func (m Model) selectedPath() string {
 	return entry.Path
 }
 
-func (m Model) indexForPath(path string) int {
-	if path == "" || len(m.files) == 0 {
+func (m Model) selectedKey() string {
+	row, ok := m.selectedRow()
+	if !ok {
+		return ""
+	}
+	return rowKey(row)
+}
+
+func rowKey(row fileRow) string {
+	if row.IsDir {
+		return "dir:" + row.Path
+	}
+	return "file:" + row.Path
+}
+
+func indexForKey(rows []fileRow, key string) int {
+	if key == "" || len(rows) == 0 {
 		return 0
 	}
-	for i, entry := range m.files {
-		if entry.Path == path {
+	for i, row := range rows {
+		if rowKey(row) == key {
 			return i
 		}
 	}
@@ -485,7 +568,7 @@ func (m *Model) ensureSelectionVisible() {
 	if m.selected >= m.fileOffset+visible {
 		m.fileOffset = m.selected - visible + 1
 	}
-	m.fileOffset = clampOffset(m.fileOffset, len(m.files), visible)
+	m.fileOffset = clampOffset(m.fileOffset, len(m.rows), visible)
 }
 
 func (m *Model) scrollDiff(delta int) {
@@ -618,6 +701,22 @@ func (m *Model) toggleFocus() {
 	}
 }
 
+func (m *Model) toggleFolder(path string) {
+	if m.collapsed == nil {
+		m.collapsed = make(map[string]bool)
+	}
+	expanded := m.collapsed[path]
+	if _, ok := m.collapsed[path]; !ok {
+		expanded = true
+	}
+	m.collapsed[path] = !expanded
+	selectedKey := "dir:" + path
+	m.rows = buildRows(m.files, m.collapsed)
+	m.selected = indexForKey(m.rows, selectedKey)
+	m.fileOffset = clampOffset(m.fileOffset, len(m.rows), m.filesVisibleHeight())
+	m.ensureSelectionVisible()
+}
+
 func (m Model) renderStatusBar() string {
 	modeLabel := "Explorer"
 	if m.mode == modeDiff {
@@ -733,6 +832,110 @@ func applyStatuses(files []git.StatusEntry, statuses []git.StatusEntry) []git.St
 		merged = append(merged, entry)
 	}
 	return merged
+}
+
+func buildRows(files []git.StatusEntry, collapsed map[string]bool) []fileRow {
+	if len(files) == 0 {
+		return nil
+	}
+	if collapsed == nil {
+		collapsed = make(map[string]bool)
+	}
+
+	type folderCount struct {
+		total   int
+		ignored int
+	}
+	folderCounts := make(map[string]folderCount)
+	for _, entry := range files {
+		if entry.Path == "" {
+			continue
+		}
+		parts := strings.Split(entry.Path, "/")
+		if len(parts) <= 1 {
+			continue
+		}
+		for i := 1; i < len(parts); i++ {
+			folderPath := strings.Join(parts[:i], "/")
+			count := folderCounts[folderPath]
+			count.total++
+			if entry.Ignored {
+				count.ignored++
+			}
+			folderCounts[folderPath] = count
+		}
+	}
+
+	rows := make([]fileRow, 0, len(files))
+	seenFolders := make(map[string]struct{})
+	for _, entry := range files {
+		if entry.Path == "" {
+			continue
+		}
+		parts := strings.Split(entry.Path, "/")
+		if len(parts) > 1 {
+			for i := 1; i < len(parts); i++ {
+				folderPath := strings.Join(parts[:i], "/")
+				if _, ok := seenFolders[folderPath]; ok {
+					continue
+				}
+				seenFolders[folderPath] = struct{}{}
+				if _, ok := collapsed[folderPath]; !ok {
+					collapsed[folderPath] = true
+				}
+				count := folderCounts[folderPath]
+				ignored := count.total > 0 && count.ignored == count.total
+				rows = append(rows, fileRow{
+					Path:      folderPath,
+					Name:      path.Base(folderPath),
+					IsDir:     true,
+					Collapsed: collapsed[folderPath],
+					Ignored:   ignored,
+					Depth:     i - 1,
+				})
+			}
+		}
+		rows = append(rows, fileRow{
+			Path:    entry.Path,
+			Name:    path.Base(entry.Path),
+			Status:  entry.Status,
+			Ignored: entry.Ignored,
+			Depth:   len(parts) - 1,
+		})
+	}
+
+	return filterCollapsedRows(rows, collapsed)
+}
+
+func filterCollapsedRows(rows []fileRow, collapsed map[string]bool) []fileRow {
+	if len(rows) == 0 {
+		return rows
+	}
+	out := make([]fileRow, 0, len(rows))
+	for _, row := range rows {
+		if isHiddenByAncestor(row.Path, collapsed) {
+			continue
+		}
+		if row.IsDir {
+			row.Collapsed = collapsed[row.Path]
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+func isHiddenByAncestor(itemPath string, collapsed map[string]bool) bool {
+	parts := strings.Split(itemPath, "/")
+	if len(parts) <= 1 {
+		return false
+	}
+	for i := 1; i < len(parts); i++ {
+		ancestor := strings.Join(parts[:i], "/")
+		if collapsed[ancestor] {
+			return true
+		}
+	}
+	return false
 }
 
 func colorizeDiffLines(lines []string) []string {
@@ -854,6 +1057,8 @@ func (m Model) renderModal() string {
 		body = append(body, "")
 		body = append(body, "Actions:")
 		body = append(body, "  Enter to commit")
+		body = append(body, "  space to toggle folder")
+		body = append(body, "  i to show/hide ignored files")
 		body = append(body, "  h for help, q/Esc to quit")
 	}
 	if m.modalErr != "" {

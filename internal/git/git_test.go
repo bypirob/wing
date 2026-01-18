@@ -2,6 +2,7 @@ package git
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -77,4 +78,66 @@ func TestFileContentsTrim(t *testing.T) {
 	if got != "hello\nworld" {
 		t.Fatalf("expected content to match, got %q", got)
 	}
+}
+
+func TestListFilesIncludeIgnored(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
+		t.Fatalf("write gitignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "keep.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write keep: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "ignored.log"), []byte("ignore"), 0o644); err != nil {
+		t.Fatalf("write ignored: %v", err)
+	}
+	runGit(t, repo, "add", "keep.txt", ".gitignore")
+
+	entries, err := ListFiles(repo, false)
+	if err != nil {
+		t.Fatalf("ListFiles error: %v", err)
+	}
+	if hasPath(entries, "ignored.log") {
+		t.Fatalf("expected ignored.log to be excluded without includeIgnored")
+	}
+	if !hasPath(entries, "keep.txt") {
+		t.Fatalf("expected keep.txt to be listed")
+	}
+
+	entries, err = ListFiles(repo, true)
+	if err != nil {
+		t.Fatalf("ListFiles include ignored error: %v", err)
+	}
+	entry, ok := entryForPath(entries, "ignored.log")
+	if !ok {
+		t.Fatalf("expected ignored.log to be listed when includeIgnored is true")
+	}
+	if !entry.Ignored || entry.Status != "!!" {
+		t.Fatalf("expected ignored entry, got %+v", entry)
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v (%s)", args, err, strings.TrimSpace(string(out)))
+	}
+}
+
+func hasPath(entries []StatusEntry, path string) bool {
+	_, ok := entryForPath(entries, path)
+	return ok
+}
+
+func entryForPath(entries []StatusEntry, path string) (StatusEntry, bool) {
+	for _, entry := range entries {
+		if entry.Path == path {
+			return entry, true
+		}
+	}
+	return StatusEntry{}, false
 }

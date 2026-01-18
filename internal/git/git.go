@@ -13,6 +13,7 @@ import (
 type StatusEntry struct {
 	Path   string
 	Status string
+	Ignored bool
 }
 
 func Status(repoPath string) ([]StatusEntry, error) {
@@ -64,7 +65,7 @@ func Status(repoPath string) ([]StatusEntry, error) {
 	return entries, nil
 }
 
-func ListFiles(repoPath string) ([]StatusEntry, error) {
+func ListFiles(repoPath string, includeIgnored bool) ([]StatusEntry, error) {
 	tracked, err := run(repoPath, "ls-files", "-z")
 	if err != nil {
 		return nil, err
@@ -72,6 +73,13 @@ func ListFiles(repoPath string) ([]StatusEntry, error) {
 	untracked, err := run(repoPath, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return nil, err
+	}
+	ignored := ""
+	if includeIgnored {
+		ignored, err = run(repoPath, "ls-files", "--others", "-i", "--exclude-standard", "-z")
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	entries := make([]StatusEntry, 0)
@@ -97,6 +105,19 @@ func ListFiles(repoPath string) ([]StatusEntry, error) {
 		}
 		seen[path] = struct{}{}
 		entries = append(entries, StatusEntry{Path: path, Status: "??"})
+	}
+
+	if includeIgnored {
+		for _, path := range splitNullPaths(ignored) {
+			if path == "" {
+				continue
+			}
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+			entries = append(entries, StatusEntry{Path: path, Status: "!!", Ignored: true})
+		}
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
